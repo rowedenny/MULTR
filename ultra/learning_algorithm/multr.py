@@ -63,151 +63,193 @@ class UserSimulator(nn.Module):
         )
 
         self.encoder = nn.GRU(input_size=hidden_size, hidden_size=hidden_size,
-                              num_layers=num_layers, bidirectional=True)
+                              num_layers=num_layers, bidirectional=True, batch_first=False)
         self.decoder = nn.GRU(input_size=hidden_size * 4, hidden_size=hidden_size,
-                              num_layers=num_layers, bidirectional=False)
+                              num_layers=num_layers, bidirectional=False, batch_first=False)
         self.dropout = nn.Dropout(p=dropout)
         self.position_embedding = nn.Embedding(100, hidden_size)
         self.click_embedding = nn.Embedding(2, self.hidden_size)
 
-        self.proj_sess = nn.Linear(hidden_size * 2, hidden_size)
+        self.proj_query = nn.Linear(hidden_size * 2, hidden_size)
         self.proj_result = nn.Linear(hidden_size, hidden_size)
-        self.click_linear = nn.Linear(hidden_size, 1)
+        self.output_linear = nn.Linear(hidden_size, 2)
 
-    def predict_click_with_label(self, input_list, input_labels):
-        """ Predict the logit of click prob for a batch of session with ground truth is known
-        :param input_list L * [batch, D]  A list of  features for each query-doc pair
-        :param input_labels: [batch, rank_list_size] the actual clicks in each session,
-                             clicks comes from click stimulation
-        :return:[Tensor]: size = [batch_size, rank_list_size, 2]
+    def convert_prob_to_click(self, input_labels):
         """
-        device = next(self.parameters()).device
+        :param input_labels: [rank_list_size, batch_size]
+        :return: tensor: [rank_list_size, batch_size]
+        """
+        rank_list_size, batch_size = input_labels.size(0), input_labels.size(1)
 
-        # [rank_list_size, batch_size, D]
-        input_tensor = torch.stack(input_list, dim=0)
-        input_tensor = input_tensor.float().to(device)
+        input_clicks = []
+        for i in range(batch_size):
+            while True:
+                click_prob = input_labels[:, i].unsqueeze(1)
+                non_click_prob = 1.0 - click_prob
+                weights = torch.cat([non_click_prob, click_prob], 1)
+                clicks = torch.multinomial(weights, 1, replacement=True)
+                if clicks.sum() > 0:
+                    input_clicks.append(clicks)
+                    break
+        input_clicks = torch.stack(input_clicks, 1).squeeze(-1)
+        return input_clicks
 
-        rank_list_size, batch_size = input_tensor.size(0), input_tensor.size(1)
-        input_tensor = self.input_transform(input_tensor)
+    def sample(self, click_logits):
+        """
+        :param click_logits: [batch_size, 2]
+        :return: sampled clicks [batch_size, 1]
+        """
+        samples = F.gumbel_softmax(click_logits, hard=True)
+        clicks = torch.argmax(samples, -1, keepdim=True)
+        return clicks
 
-        # query context encoder
+    def predict_with_label(self, input_data, input_labels, teacher_forcing_ratio):
+        """ infer the conditional click probability for doc at each position
+        :param input_data: [rank_list_size, batch_size, feature_size]
+        :param input_labels: [rank_list_size, batch_size]
+        :return:
+        """
+        use_teacher_forcing = True if random.random() < teacher_forcing_ratio else False
+
+        rank_list_size, batch_size = input_data.size(0), input_data.size(1)
+        input_tensor = self.input_transform(input_data)
+
+        # query feature [rank_list_size, batch_size, D]
         output, hidden = self.encoder(input_tensor)
-        # [1, batch_size, D]
-        sess_feature = output[-1].unsqueeze(0)
-        sess_feature_proj = self.proj_sess(sess_feature).expand(rank_list_size, -1, -1)
+        query_context = output[-1].unsqueeze(0)
+        query_feature = self.proj_query(query_context).expand(rank_list_size, -1, -1)
 
-        # result feature projection [rank_list_size, batch_size, D]
-        result_feature_proj = self.proj_result(input_tensor)
+        # doc features [rank_list_size, batch_size, D]
+        result_feature = self.proj_result(input_tensor)
 
-        # position features
-        position_indices = torch.arange(rank_list_size, dtype=torch.long, device=device)
-        # [rank_list_size, D]
-        position_features = self.position_embedding(position_indices)
-        # [rank_list_size, batch_size, D]
-        position_features = position_features.unsqueeze(1).expand(-1, batch_size, -1)
+        # positions feature [rank_list_size, batch_size, D]
+        position_indices = torch.arange(rank_list_size, dtype=torch.long).to(input_data.device)
+        position_feature = self.position_embedding(position_indices)
+        position_feature = position_feature.unsqueeze(1).expand(-1, batch_size, -1)
 
-        # click features
-        # padding = torch.full((batch_size, 1), self.padding_idx, dtype=torch.long).to(device)
-        padding = torch.full((batch_size, 1), 0, dtype=torch.long).to(device)
+        if use_teacher_forcing:
+            # [rank_list_size, batch_size]
+            # input_labels = self.convert_prob_to_click(input_labels)
+            input_clicks = input_labels.long()
+            padding = Variable(torch.zeros(1, batch_size)).long().to(input_data.device)
+            input_clicks = torch.cat((padding, input_clicks), dim=0)
+            input_clicks = input_clicks[:-1, :]
+            # [rank_list_size, batch_size, D]
+            click_feature = self.click_embedding(input_clicks)
 
-        # [batch_size, rank_list_size]
-        previous_clicks = torch.cat([padding, input_labels[:, :-1]], dim=1).long()
-        # [rank_list_size, batch_size, D]
-        click_features = self.click_embedding(previous_clicks).transpose(0, 1)
+            input_feature = torch.cat((query_feature, result_feature, position_feature, click_feature), 2)
+            init_state = Variable(torch.zeros((1 * self.num_layers, batch_size, self.hidden_size))).to(
+                input_data.device)
+            output, hidden = self.decoder(input_feature, init_state)
+            output = self.dropout(output)
+            # [rank_list_size, batch_size, 2]
+            output_logits = self.output_linear(output)
+            # [rank_list_size, batch_size, 1, 2]
+            return output_logits.unsqueeze(2)
 
-        # [rank_list_size, batch_size, D * 4]
-        feature_input = torch.cat([sess_feature_proj, result_feature_proj, position_features, click_features], -1)
-
-        # decode click
-        decoder_hidden = Variable(torch.zeros(1 * self.num_layers, batch_size, self.hidden_size)).to(device)
-        click_output, click_hidden = self.decoder(feature_input, decoder_hidden)
-        click_output = self.dropout(click_output)
-        # [rank_list_size, batch_size, 1]
-        outputs_prob = F.sigmoid(self.click_linear(click_output))
-
-        return outputs_prob
-
-    def predict_click_without_label(self, input_list):
-        device = next(self.parameters()).device
-
-        # [rank_list_size, batch_size, D]
-        input_tensor = torch.stack(input_list, dim=0)
-        input_tensor = input_tensor.float().to(device)
-
-        rank_list_size, batch_size = input_tensor.size(0), input_tensor.size(1)
-        input_tensor = self.input_transform(input_tensor)
-
-        # query context encoder
-        output, hidden = self.encoder(input_tensor)
-        # [1, batch_size, D]
-        sess_feature = output[-1].unsqueeze(0)
-        sess_feature_proj = self.proj_sess(sess_feature).expand(rank_list_size, -1, -1)
-
-        # result feature projection [rank_list_size, batch_size, D]
-        result_feature_proj = self.proj_result(input_tensor)
-
-        # decode click
-        outputs_prob, outputs_click = [], []
-        decoder_hidden = None
-        previous_clicks = Variable(torch.full([batch_size], 0, dtype=torch.long)).to(device)
-        for i in range(rank_list_size):
-            # [batch_size, D]
-            position_features = self.position_embedding.weight[i]
-            position_features = torch.unsqueeze(position_features, 0).expand(batch_size, -1)
-            click_features = self.click_embedding(previous_clicks)
-
-            input_features = torch.cat([sess_feature_proj[i], result_feature_proj[i],
-                                        position_features, click_features], -1)
-            # [1, batch_size, D * 4]
-            input_features = torch.unsqueeze(input_features, 0)
-
-            if decoder_hidden is None:
-                decoder_hidden = Variable(torch.zeros(1 * self.num_layers, batch_size, self.hidden_size)).to(device)
-            decoder_output, decoder_hidden = self.decoder(input_features, decoder_hidden)
-
-            # [1, batch_size, D]
-            decoder_output = self.dropout(decoder_output)
-            # [batch_size, 1]
-            click_now_prob = F.sigmoid(self.click_linear(decoder_output)).squeeze(0)
-
-            click_now = self.sample(click_now_prob)
-            previous_clicks = click_now
-
-            outputs_prob.append(click_now_prob)
-            outputs_click.append(click_now)
-
-        # [rank_size, batch_size, 1]
-        outputs_prob = torch.stack(outputs_prob, 0)
-        # [rank_size, batch_size]
-        outputs_click = torch.stack(outputs_click, 0)
-        return outputs_prob, outputs_click
-
-    def sample(self, click_prob):
-        notclick_prob = 1.0 - click_prob
-        weights = torch.cat([notclick_prob, click_prob], 1)
-        clicks = torch.multinomial(weights, 1, replacement=True)
-        return clicks.squeeze(1)
-
-    def build(self, input_list, input_labels=None, return_probs=False):
-        """
-        :return: [List]: rank_list_size * [batch_size, *]
-        """
-        if input_labels is None:
-            # generate click simulation
-            # [rank_size, batch_size, 1], [rank_list, batch_size]
-            outputs_prob, outputs_click = self.predict_click_without_label(input_list)
-
-            if return_probs:
-                return torch.unbind(outputs_prob, dim=0)
-            else:
-                # [rank_size, batch_size, 1]
-                outputs_click = torch.unsqueeze(outputs_click, -1)
-                return torch.unbind(outputs_click, dim=0)
         else:
-            # train mode
-            # [rank_list_size, batch_size, 1]
-            outputs_prob = self.predict_click_with_label(input_list, input_labels)
-            return torch.unbind(outputs_prob, dim=0)
+            output_logits = []
+            decoder_hidden = Variable(torch.zeros((1 * self.num_layers, batch_size, self.hidden_size))).to(
+                input_data.device)
+            previous_click = Variable(torch.zeros(batch_size, 1)).long().to(input_data.device)
+            for i in range(rank_list_size):
+                # [batch_size, 1, D]
+                click_feature = self.click_embedding(previous_click)
+                click_feature = torch.squeeze(click_feature, 1)
+                input_feature = torch.cat((query_feature[i], result_feature[i], position_feature[i], click_feature), -1)
+                # [1, batch_size, D * 4]
+                input_feature = torch.unsqueeze(input_feature, 0)
+
+                decoder_output, decoder_hidden = self.decoder(input_feature, decoder_hidden)
+                decoder_output = self.dropout(decoder_output)
+                # [1, batch_size, 2]
+                decoder_logits = self.output_linear(decoder_output)
+                click_logits = torch.squeeze(decoder_logits, 0)
+
+                # [batch_size, 2]
+                output_logits.append(click_logits)
+                previous_click = self.sample(click_logits)
+
+            # [rank_list_size, batch_size, 2]
+            output_logits = torch.stack(output_logits, 0)
+            # [rank_list_size, batch_size, 1, 2]
+            output_logits = torch.unsqueeze(output_logits, 2)
+            return output_logits
+
+    def predict_without_label(self, input_data):
+        """ infer clicks for doc at each position
+        :param input_data:
+        :return:
+        """
+        rank_list_size, batch_size = input_data.size(0), input_data.size(1)
+        input_tensor = self.input_transform(input_data)
+
+        # query feature [rank_list_size, batch_size, D]
+        output, hidden = self.encoder(input_tensor)
+        query_context = output[-1].unsqueeze(0)
+        query_feature = self.proj_query(query_context).expand(rank_list_size, -1, -1)
+
+        # doc features [rank_list_size, batch_size, D]
+        result_feature = self.proj_result(input_tensor)
+
+        # positions feature [rank_list_size, batch_size, D]
+        position_indices = torch.arange(rank_list_size, dtype=torch.long).to(input_data.device)
+        position_feature = self.position_embedding(position_indices)
+        position_feature = position_feature.unsqueeze(1).expand(-1, batch_size, -1)
+
+        output_probs, output_clicks = [], []
+        decoder_hidden = Variable(torch.zeros((1 * self.num_layers, batch_size, self.hidden_size))).to(input_data.device)
+        previous_click = Variable(torch.zeros(batch_size, 1)).long().to(input_data.device)
+        for i in range(rank_list_size):
+            # [batch_size, 1, D]
+            click_feature = self.click_embedding(previous_click)
+            click_feature = torch.squeeze(click_feature, 1)
+            input_feature = torch.cat((query_feature[i], result_feature[i], position_feature[i], click_feature), -1)
+            # [1, batch_size, D * 4]
+            input_feature = torch.unsqueeze(input_feature, 0)
+
+            decoder_output, decoder_hidden = self.decoder(input_feature, decoder_hidden)
+            decoder_output = self.dropout(decoder_output)
+            # [1, batch_size, 2]
+            decoder_logits = self.output_linear(decoder_output)
+            click_logits = torch.squeeze(decoder_logits, 0)
+
+            # [batch_size, 1]
+            click_now = self.sample(click_logits)
+            # [batch_size, 1]
+            click_probs = F.softmax(click_logits, -1)[:, 1].unsqueeze(-1)
+
+            previous_click = click_now
+            output_clicks.append(click_now)
+            output_probs.append(click_probs)
+
+        # [rank_list_size, batch_size, 1]
+        output_clicks = torch.stack(output_clicks, 0)
+        # [rank_list_size, batch_size, 1]
+        output_probs = torch.stack(output_probs, 0)
+        return output_clicks, output_probs
+
+    def build(self, input_list, input_labels=None, return_clicks=True, teacher_forcing_ratio=.0):
+        """ input_list --> input_data [rank_list_size, batch_size, D]
+            input_labels ---> [batch_size, rank_list_size]
+        """
+        device = next(self.parameters()).device
+        # [rank_list_size, batch_size, D]
+        input_data = torch.stack(input_list, dim=0).to(dtype=torch.float32, device=device)
+        if input_labels is None:
+            output_clicks, output_probs = self.predict_without_label(input_data)
+            if return_clicks:
+                # [rank_list_size, batch_size, 1]
+                return torch.unbind(output_clicks, dim=0)
+            else:
+                # [rank_list_size, batch_size, 1]
+                return torch.unbind(output_probs, dim=0)
+        else:
+            # [rank_list_size, batch_size]
+            input_labels = input_labels.transpose(0, 1)
+            # [rank_list_size, batch_size, 1, 2]
+            output_logits = self.predict_with_label(input_data, input_labels, teacher_forcing_ratio)
+            return torch.unbind(output_logits, dim=0)
 
 
 class MULTR(BaseAlgorithm):
@@ -220,15 +262,16 @@ class MULTR(BaseAlgorithm):
             max_gradient_norm=5.0,                # Clip gradients to this norm.
             ranker_loss_weight=1.0,               # Set the weight of unbiased ranking loss
             l2_loss=0.0,                          # Set strength for L2 regularization.
-            env_l2_loss=1e-5,
+            env_l2_loss=1e-3,
             grad_strategy='ada',                  # Select gradient strategy for model
             logits_to_prob='softmax',             # the function used to convert logits to probability distributions
             max_propensity_weight=-1,             # Set maximum value for propensity weights
             loss_func='softmax_loss',             # Select Loss function
             propensity_learning_rate=-1.0,        # The learning rate for ranker (-1 means same with learning_rate).
-            env_loss_func='softmax_cross_entropy_with_prob',           # Select Loss function
+            env_loss_func='softmax_cross_entropy_with_logit',           # Select Loss function
             sample_num=16,                        #
-            sample_cutoff=10,
+            hidden_size=64,
+            teacher_forcing_ratio=0.5
         )
 
         self.is_cuda_avail = torch.cuda.is_available()
@@ -245,10 +288,9 @@ class MULTR(BaseAlgorithm):
         self.feature_size = data_set.feature_size
         self.max_candidate_num = exp_settings['max_candidate_num']
         self.sample_num = self.hparams.sample_num
-        self.sample_cutoff = self.hparams.sample_cutoff
 
         self.model = self.create_model(self.feature_size)
-        self.user_simulator = UserSimulator(self.feature_size, 64, num_layers=1, dropout=0.4)
+        self.user_simulator = UserSimulator(self.feature_size, self.hparams.hidden_size, num_layers=1, dropout=0.4)
         self.propensity_model = DenoisingNet(self.rank_list_size)
 
         if self.is_cuda_avail:
@@ -277,10 +319,10 @@ class MULTR(BaseAlgorithm):
         if self.hparams.logits_to_prob == 'sigmoid':
             self.logits_to_prob = sigmoid_prob
 
-        self.optimizer_simulator = torch.optim.Adam(self.user_simulator.parameters(),
-                                                    lr=self.hparams.env_learning_rate,
-                                                    weight_decay=self.hparams.env_l2_loss)
-        self.optimizer_func = torch.optim.Adagrad
+        self.optimizer_simulator = torch.optim.Adagrad(self.user_simulator.parameters(),
+                                                       lr=self.hparams.env_learning_rate,
+                                                       weight_decay=self.hparams.env_l2_loss)
+        self.optimizer_func = torch.optim.Adam
         if self.hparams.grad_strategy == 'sgd':
             self.optimizer_func = torch.optim.SGD
 
@@ -296,8 +338,8 @@ class MULTR(BaseAlgorithm):
 
         print('Environment Loss Function is ' + self.hparams.env_loss_func)
         self.env_loss_func = None
-        if self.hparams.env_loss_func == 'softmax_cross_entropy_with_prob':
-            self.env_loss_func = self.softmax_cross_entropy_with_prob
+        if self.hparams.env_loss_func == 'softmax_cross_entropy_with_logit':
+            self.env_loss_func = self.softmax_cross_entropy_with_logit
         else:
             raise NotImplementedError
 
@@ -339,13 +381,22 @@ class MULTR(BaseAlgorithm):
         total_norm = total_norm ** (1. / 2)
         self.norm = total_norm
 
-    def softmax_cross_entropy_with_prob(self, outputs, labels):
+    def softmax_cross_entropy_with_logit(self, outputs, labels):
+        """
+        :param outputs: [batch_size, rank_list_size, 2]
+        :param labels:  [batch_size, rank_list_size]
+        :return:
+        """
         assert outputs.size(0) == labels.size(0)
         assert outputs.size(1) == labels.size(1)
 
+        batch_size, rank_list_size = labels.size(0), labels.size(1)
+        outputs = outputs.contiguous().view(-1, 2)
+        labels = labels.contiguous().view(-1).long()
+
         # [batch_size, rank_list_size]
-        criterion = torch.nn.BCELoss()
-        loss = criterion(outputs, labels)
+        loss = torch.nn.CrossEntropyLoss(reduction="none")(outputs, labels)
+        loss = torch.sum(loss) / batch_size
         return loss
 
     def generate_pseudo_id_list(self, sample_num):
@@ -353,7 +404,7 @@ class MULTR(BaseAlgorithm):
         sampled_pseudo_id_list = []
 
         for _ in range(sample_num):
-            random_indices = np.random.choice(self.sample_cutoff, self.rank_list_size, replace=False)
+            random_indices = np.random.choice(self.rank_list_size, self.rank_list_size, replace=False)
             current_batch = self.docid_inputs[random_indices, :]
             sampled_pseudo_id_list.append(current_batch)
 
@@ -364,7 +415,6 @@ class MULTR(BaseAlgorithm):
     def train_simulator(self, input_feed):
         """ Run a step of the simulator training, feeding the given inputs for training process.
         :param input_feed: (dictionary) A dictionary containing all the input feed data.
-        :param teacher_forcing_ratio: the probability to apply the ground truth to train the model
         :return: A triple consisting of the loss, outputs (None if we do backward),
                  and a tf.summary containing related information about the step.
         """
@@ -372,8 +422,9 @@ class MULTR(BaseAlgorithm):
         self.user_simulator.train()
         self.create_input_feed(input_feed, self.rank_list_size)
 
-        train_output = self.ranking_model(self.user_simulator, self.rank_list_size,
-                                          input_labels=self.labels)
+        train_output = self.ranking_model(self.user_simulator, self.rank_list_size, input_labels=self.labels,
+                                          teacher_forcing_ratio=self.hparams.teacher_forcing_ratio)
+
         self.loss = self.env_loss_func(train_output, self.labels)
         self.opt_step(self.optimizer_simulator, self.user_simulator.parameters())
 
@@ -381,52 +432,17 @@ class MULTR(BaseAlgorithm):
         print(" [User Simulator] Loss %f at Global Step %d: " % (self.loss.item(), self.global_step))
         return self.loss.item(), None, self.train_summary
 
-    def eval_simulator(self, input_feed, ranking_model=None):
-        rank_list_size = 10
-
+    def eval_simulator(self, input_feed):
         self.user_simulator.eval()
-        self.create_input_feed(input_feed, self.max_candidate_num)
+        self.create_input_feed(input_feed, self.rank_list_size)
 
-        if ranking_model is None:
-            # self.labels: [batch_size, max_doc]
-            labels = self.labels.cpu()
-            _, indices = labels.sort(descending=True, dim=-1)
-            indices = indices[:, :rank_list_size]
+        with torch.no_grad():
+            test_output_probs = self.ranking_model(self.user_simulator, self.rank_list_size,
+                                                   return_clicks=False)
 
-            # self.docid_inputs: [max_doc, batch_size]
-            docid_inputs = self.docid_inputs.transpose(0, 1).cpu()
-            sorted_ids = torch.gather(docid_inputs, dim=1, index=indices)
-            sorted_ids = sorted_ids.transpose(0, 1)
-
-            with torch.no_grad():
-                self.output = self.get_ranking_scores(model=self.user_simulator, input_id_list=sorted_ids, return_probs=True)
-
-            # [batch, rank_list_size]
-            output_scores = torch.cat(self.output, 1)
-        else:
-            with torch.no_grad():
-                ranking_output = self.ranking_model(ranking_model.model, self.max_candidate_num)
-                labels = ranking_output.cpu()
-                _, indices = labels.sort(descending=True, dim=-1)
-                indices = indices[:, :rank_list_size]
-
-                # self.docid_inputs: [max_doc, batch_size]
-                docid_inputs = self.docid_inputs.transpose(0, 1).cpu()
-                sorted_ids = torch.gather(docid_inputs, dim=1, index=indices)
-                sorted_ids = sorted_ids.transpose(0, 1)
-
-                with torch.no_grad():
-                    self.output = self.get_ranking_scores(model=self.user_simulator, input_id_list=sorted_ids,
-                                                          return_probs=True)
-
-                # [batch, rank_list_size]
-                output_scores = torch.cat(self.output, 1)
-
-        discounts = (torch.tensor(1) / torch.log2(torch.arange(output_scores.size(1), dtype=torch.float) + 2.0)).to(
-            device=self.cuda)
-        dcg_ac = (output_scores * discounts).sum(dim=-1).mean()
-        eval_summary = {'dcg_ac': dcg_ac}
-        return None, output_scores, eval_summary  # no loss, outputs, summary.
+        prob_delta = torch.abs(self.labels - test_output_probs).mean()
+        eval_summary = {'prob_abs': prob_delta}
+        return None, test_output_probs, eval_summary
 
     def train(self, input_feed):
         """Run a step of the model feeding the given inputs.
@@ -436,15 +452,15 @@ class MULTR(BaseAlgorithm):
             A triple consisting of the loss, outputs (None if we do backward),
             and a tf.summary containing related information about the step.
         """
+        self.global_step += 1
         # Build model
-        self.rank_list_size = self.exp_settings['selection_bias_cutoff']
         self.model.train()
         self.propensity_model.train()
         self.user_simulator.eval()
 
-        self.create_input_feed(input_feed, self.max_candidate_num)
+        self.create_input_feed(input_feed, self.rank_list_size)
         train_output = self.ranking_model(self.model, self.rank_list_size)
-        train_labels = self.labels[:, :self.rank_list_size]
+        train_labels = self.labels
 
         propensity_labels = torch.transpose(train_labels, 0, 1)
         self.propensity = self.propensity_model(propensity_labels)
@@ -480,7 +496,6 @@ class MULTR(BaseAlgorithm):
         self.clip_grad_value(observed_pseudo_labels, clip_value_min=0, clip_value_max=1)
         self.clip_grad_value(unobserved_pseudo_labels, clip_value_min=0, clip_value_max=1)
         print(" [Ranking Model] Loss %f at Global Step %d: " % (self.loss.item(), self.global_step))
-        self.global_step += 1
         return self.loss.item(), None, self.train_summary
 
     def validation(self, input_feed, is_online_simulation=False):

@@ -1,3 +1,11 @@
+"""Training and testing unbiased learning to rank algorithms.
+
+See the following paper for more information about different algorithms.
+
+    * Qingyao Ai, Keping Bi, Cheng Luo, Jiafeng Guo, W. Bruce Croft. 2018. Unbiased Learning to Rank with Unbiased Propensity Estimation. In Proceedings of SIGIR '18
+
+"""
+
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
@@ -11,9 +19,7 @@ from torch.utils.tensorboard import SummaryWriter
 import argparse
 import json
 import ultra
-import numpy as np
 from ultra.utils.sys_tools import init_seed
-
 
 # rank list size should be read from data
 parser = argparse.ArgumentParser(description='Pipeline commandline argument')
@@ -25,9 +31,9 @@ parser.add_argument("--valid_data_prefix", type=str, default="valid",
                     help="The name prefix of the validation data in data_dir.")
 parser.add_argument("--test_data_prefix", type=str, default="test",
                     help="The name prefix of the test data in data_dir.")
-parser.add_argument("--model_dir", type=str, default="./tests/pbm_model/Yahoo/",
+parser.add_argument("--model_dir", type=str, default="./tests/cascade_model/Yahoo/",
                     help="The directory for model and intermediate outputs.")
-parser.add_argument("--output_dir", type=str, default="./tests/pbm_output/Yahoo/",
+parser.add_argument("--output_dir", type=str, default="./tests/cascade_model/Yahoo/",
                     help="The directory to output results.")
 
 parser.add_argument("--click_model_dir", type=str, default=None,
@@ -42,7 +48,7 @@ parser.add_argument("--batch_size", type=int, default=256,
                     help="Batch size to use during training.")
 parser.add_argument("--max_list_cutoff", type=int, default=0,
                     help="The maximum number of top documents to consider in each rank list (0: no limit).")
-parser.add_argument("--selection_bias_cutoff", type=int, default=5,
+parser.add_argument("--selection_bias_cutoff", type=int, default=10,
                     help="The maximum number of top documents to be shown to user "
                          "(which creates selection bias) in each rank list (0: no limit).")
 parser.add_argument("--max_train_iteration", type=int, default=10000,
@@ -142,6 +148,7 @@ def train(exp_settings):
         test_writer = torch.utils.tensorboard.SummaryWriter(log_dir=args.model_dir + '/test_log')
 
     # This is the training loop.
+    """
     # 1. train user simulator
     step_time, loss = 0.0, 0.0
     current_step = 0
@@ -168,7 +175,19 @@ def train(exp_settings):
                 print("current_step: ", current_step)
                 break
 
+    checkpoint_path = os.path.join(args.model_dir, "%s.user_simulator.ckpt" % exp_settings['learning_algorithm'])
+    print("Save model to %s" % checkpoint_path)
+    torch.save(model.user_simulator.state_dict(), checkpoint_path)
+    """
+
     # 2. train ranking model
+    # 2.1 load user simulator
+    checkpoint_path = os.path.join(args.model_dir, "%s.user_simulator.ckpt" % exp_settings['learning_algorithm'])
+    ckpt = torch.load(checkpoint_path)
+    print("Reading user simulator parameters from %s" % checkpoint_path)
+    model.user_simulator.load_state_dict(ckpt)
+    model.user_simulator.eval()
+
     step_time, loss = 0.0, 0.0
     current_step = 0
     previous_losses = []
@@ -177,8 +196,7 @@ def train(exp_settings):
     while True:
         # Get a batch and make a step.
         start_time = time.time()
-        input_feed, info_map = train_input_feed.get_batch(train_set, check_validation=True,
-                                                          data_format=args.data_format, get_all_doc=True)
+        input_feed, info_map = train_input_feed.get_batch(train_set, check_validation=True, data_format=args.data_format)
         step_loss, _, summary = model.train(input_feed)
         step_time += (time.time() - start_time) / args.steps_per_checkpoint
         loss += step_loss / args.steps_per_checkpoint
@@ -295,7 +313,7 @@ def test(exp_settings):
         summary_list.append(copy.deepcopy(summary))
         batch_size_list.append(len(info_map['input_list']))
         for x in range(batch_size_list[-1]):
-            rerank_scores.append(output_logits[x])
+            rerank_scores.append(output_logits[x].cpu().numpy())
         it += batch_size_list[-1]
         count_batch += 1.0
         print("Testing {:.0%} finished".format(float(it) / len(test_set.initial_list)), end="\r", flush=True)
