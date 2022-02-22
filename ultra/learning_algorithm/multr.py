@@ -257,46 +257,45 @@ class MULTR(BaseAlgorithm):
         print('Build Model-based Unbiased Learning to Rank Model')
 
         self.hparams = ultra.utils.hparams.HParams(
-            learning_rate=0.05,                   # Learning rate
+            learning_rate=0.5,                   # Learning rate
             env_learning_rate=1e-3,
             max_gradient_norm=5.0,                # Clip gradients to this norm.
             ranker_loss_weight=1.0,               # Set the weight of unbiased ranking loss
             l2_loss=0.0,                          # Set strength for L2 regularization.
-            env_l2_loss=1e-3,
+            env_l2_loss=1e-5,
             grad_strategy='ada',                  # Select gradient strategy for model
             logits_to_prob='softmax',             # the function used to convert logits to probability distributions
             max_propensity_weight=-1,             # Set maximum value for propensity weights
             loss_func='softmax_loss',             # Select Loss function
             propensity_learning_rate=-1.0,        # The learning rate for ranker (-1 means same with learning_rate).
+            constant_propensity_initialization=False,                   # Set true to initialize propensity with constants.
             env_loss_func='softmax_cross_entropy_with_logit',           # Select Loss function
             sample_num=16,                        #
             hidden_size=64,
             teacher_forcing_ratio=0.5
         )
 
+        print(exp_settings['learning_algorithm_hparams'])
+        self.cuda = torch.device('cuda')
         self.is_cuda_avail = torch.cuda.is_available()
         self.writer = SummaryWriter()
-        self.cuda = torch.device('cuda')
         self.train_summary = {}
         self.eval_summary = {}
-        self.is_training = "is_train"
-        print(exp_settings['learning_algorithm_hparams'])
         self.hparams.parse(exp_settings['learning_algorithm_hparams'])
         self.exp_settings = exp_settings
-        if 'selection_bias_cutoff' in self.exp_settings.keys():
-            self.rank_list_size = self.exp_settings['selection_bias_cutoff']
-        self.feature_size = data_set.feature_size
         self.max_candidate_num = exp_settings['max_candidate_num']
-        self.sample_num = self.hparams.sample_num
-
+        self.feature_size = data_set.feature_size
+        if 'selection_bias_cutoff' in exp_settings.keys():
+            self.rank_list_size = self.exp_settings['selection_bias_cutoff']
+            self.propensity_model = DenoisingNet(self.rank_list_size)
         self.model = self.create_model(self.feature_size)
         self.user_simulator = UserSimulator(self.feature_size, self.hparams.hidden_size, num_layers=1, dropout=0.4)
-        self.propensity_model = DenoisingNet(self.rank_list_size)
 
         if self.is_cuda_avail:
             self.model = self.model.to(device=self.cuda)
-            self.user_simulator = self.user_simulator.to(device=self.cuda)
             self.propensity_model = self.propensity_model.to(device=self.cuda)
+            self.user_simulator = self.user_simulator.to(device=self.cuda)
+
         self.letor_features_name = "letor_features"
         self.letor_features = None
         self.docid_inputs_name = []  # a list of top documents
@@ -312,6 +311,7 @@ class MULTR(BaseAlgorithm):
         else:
             self.propensity_learning_rate = float(self.hparams.propensity_learning_rate)
         self.learning_rate = float(self.hparams.learning_rate)
+
         self.global_step = 0
 
         # Select logits to prob function
@@ -319,12 +319,12 @@ class MULTR(BaseAlgorithm):
         if self.hparams.logits_to_prob == 'sigmoid':
             self.logits_to_prob = sigmoid_prob
 
-        self.optimizer_simulator = torch.optim.Adagrad(self.user_simulator.parameters(),
-                                                       lr=self.hparams.env_learning_rate,
-                                                       weight_decay=self.hparams.env_l2_loss)
-        self.optimizer_func = torch.optim.Adam
+        self.optimizer_func = torch.optim.Adagrad
         if self.hparams.grad_strategy == 'sgd':
             self.optimizer_func = torch.optim.SGD
+        self.optimizer_simulator = torch.optim.Adam(self.user_simulator.parameters(),
+                                                    lr=self.hparams.env_learning_rate,
+                                                    weight_decay=self.hparams.env_l2_loss)
 
         print('Loss Function is ' + self.hparams.loss_func)
         # Select loss function
@@ -353,7 +353,7 @@ class MULTR(BaseAlgorithm):
             #    self.exam_loss += self.hparams.l2_loss * tf.nn.l2_loss(p)
             for p in ranking_model_params:
                 self.rank_loss += self.hparams.l2_loss * self.l2_loss(p)
-        self.loss = self.exam_loss + self.hparams.ranker_loss_weight * (self.deivate_loss + self.unobserved_pseudo_loss)
+        self.loss = self.exam_loss + self.hparams.ranker_loss_weight * self.rank_loss
 
         opt_denoise = self.optimizer_func(self.propensity_model.parameters(), self.propensity_learning_rate)
         opt_ranker = self.optimizer_func(self.model.parameters(), self.learning_rate)
@@ -418,7 +418,6 @@ class MULTR(BaseAlgorithm):
         :return: A triple consisting of the loss, outputs (None if we do backward),
                  and a tf.summary containing related information about the step.
         """
-        self.global_step += 1
         self.user_simulator.train()
         self.create_input_feed(input_feed, self.rank_list_size)
 
@@ -430,6 +429,7 @@ class MULTR(BaseAlgorithm):
 
         nn.utils.clip_grad_value_(self.labels, 1)
         print(" [User Simulator] Loss %f at Global Step %d: " % (self.loss.item(), self.global_step))
+        self.global_step += 1
         return self.loss.item(), None, self.train_summary
 
     def eval_simulator(self, input_feed):
@@ -439,7 +439,6 @@ class MULTR(BaseAlgorithm):
         with torch.no_grad():
             test_output_probs = self.ranking_model(self.user_simulator, self.rank_list_size,
                                                    return_clicks=False)
-
         prob_delta = torch.abs(self.labels - test_output_probs).mean()
         eval_summary = {'prob_abs': prob_delta}
         return None, test_output_probs, eval_summary
@@ -452,26 +451,27 @@ class MULTR(BaseAlgorithm):
             A triple consisting of the loss, outputs (None if we do backward),
             and a tf.summary containing related information about the step.
         """
-        self.global_step += 1
         # Build model
+        self.rank_list_size = self.exp_settings['selection_bias_cutoff']
         self.model.train()
-        self.propensity_model.train()
-        self.user_simulator.eval()
+        # self.user_simulator.eval()
 
         self.create_input_feed(input_feed, self.rank_list_size)
         train_output = self.ranking_model(self.model, self.rank_list_size)
-        train_labels = self.labels
 
-        propensity_labels = torch.transpose(train_labels, 0, 1)
+        self.propensity_model.train()
+        propensity_labels = torch.transpose(self.labels, 0, 1)
         self.propensity = self.propensity_model(propensity_labels)
         with torch.no_grad():
             self.propensity_weights = self.get_normalized_weights(self.logits_to_prob(self.propensity))
-        self.rank_loss = self.loss_func(train_output, train_labels, self.propensity_weights)
+        self.rank_loss = self.loss_func(train_output, self.labels, self.propensity_weights)
 
         # Compute examination loss
         with torch.no_grad():
             self.relevance_weights = self.get_normalized_weights(self.logits_to_prob(train_output))
-        self.exam_loss = self.loss_func(self.propensity, train_labels, self.relevance_weights)
+        self.exam_loss = self.loss_func(self.propensity, self.labels, self.relevance_weights)
+
+        """
 
         # IPS loss for observed ranking list with pseudo lists
         with torch.no_grad():
@@ -487,15 +487,18 @@ class MULTR(BaseAlgorithm):
         unobserved_pseudo_labels = torch.cat(unobserved_pseudo_labels, 1)
         unobserved_pseudo_output = torch.cat(unobserved_pseudo_output, 1)
         self.unobserved_pseudo_loss = self.loss_func(unobserved_pseudo_output, unobserved_pseudo_labels)
+        """
 
         # Gradients and SGD update operation for training the model.
-        self.loss = self.exam_loss + self.hparams.ranker_loss_weight * (self.deivate_loss + self.unobserved_pseudo_loss)
+        # self.loss = self.exam_loss + self.hparams.ranker_loss_weight * (self.deivate_loss + self.unobserved_pseudo_loss)
+        self.loss = self.exam_loss + self.hparams.ranker_loss_weight * self.rank_loss
         self.separate_gradient_update()
 
-        self.clip_grad_value(train_labels, clip_value_min=0, clip_value_max=1)
-        self.clip_grad_value(observed_pseudo_labels, clip_value_min=0, clip_value_max=1)
-        self.clip_grad_value(unobserved_pseudo_labels, clip_value_min=0, clip_value_max=1)
+        self.clip_grad_value(self.labels, clip_value_min=0, clip_value_max=1)
+        # self.clip_grad_value(observed_pseudo_labels, clip_value_min=0, clip_value_max=1)
+        # self.clip_grad_value(unobserved_pseudo_labels, clip_value_min=0, clip_value_max=1)
         print(" [Ranking Model] Loss %f at Global Step %d: " % (self.loss.item(), self.global_step))
+        self.global_step += 1
         return self.loss.item(), None, self.train_summary
 
     def validation(self, input_feed, is_online_simulation=False):
@@ -519,8 +522,10 @@ class MULTR(BaseAlgorithm):
 
     def get_normalized_weights(self, propensity):
         """Computes listwise softmax loss with propensity weighting.
+
         Args:
             propensity: (tf.Tensor) A tensor of the same shape as `output` containing the weight of each element.
+
         Returns:
             (tf.Tensor) A tensor containing the propensity weights.
         """
@@ -538,7 +543,9 @@ class MULTR(BaseAlgorithm):
 
     def clip_grad_value(self, parameters, clip_value_min, clip_value_max) -> None:
         r"""Clips gradient of an iterable of parameters at specified value.
+
         Gradients are modified in-place.
+
         Args:
             parameters (Iterable[Tensor] or Tensor): an iterable of Tensors or a
                 single Tensor that will have gradients normalized
