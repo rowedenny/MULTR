@@ -23,7 +23,7 @@ from ultra.utils.sys_tools import init_seed
 
 # rank list size should be read from data
 parser = argparse.ArgumentParser(description='Pipeline commandline argument')
-parser.add_argument("--data_dir", type=str, default="./Yahoo_letor/tmp_data/",
+parser.add_argument("--data_dir", type=str, default="./MSLR_30k_letor/tmp_data/",
                     help="The directory of the experimental dataset.")
 parser.add_argument("--train_data_prefix", type=str, default="train",
                     help="The name prefix of the training data in data_dir.")
@@ -31,9 +31,9 @@ parser.add_argument("--valid_data_prefix", type=str, default="valid",
                     help="The name prefix of the validation data in data_dir.")
 parser.add_argument("--test_data_prefix", type=str, default="test",
                     help="The name prefix of the test data in data_dir.")
-parser.add_argument("--model_dir", type=str, default="./tests/cascade_model/Yahoo/",
+parser.add_argument("--model_dir", type=str, default="./tests/cascade_model/MSLR_30k/",
                     help="The directory for model and intermediate outputs.")
-parser.add_argument("--output_dir", type=str, default="./tests/cascade_model/Yahoo/",
+parser.add_argument("--output_dir", type=str, default="./tests/cascade_model/MSLR_30k/",
                     help="The directory to output results.")
 
 parser.add_argument("--click_model_dir", type=str, default=None,
@@ -148,7 +148,6 @@ def train(exp_settings):
         test_writer = torch.utils.tensorboard.SummaryWriter(log_dir=args.model_dir + '/test_log')
 
     # This is the training loop.
-    """
     # 1. train user simulator
     step_time, loss = 0.0, 0.0
     current_step = 0
@@ -167,7 +166,7 @@ def train(exp_settings):
         if current_step % args.steps_per_checkpoint == 0:
             # Print statistics for the previous epoch.
             print("[User Simulator] global step %d learning rate %.4f step-time %.2f loss "
-                  "%.4f" % (model.global_step, model.learning_rate, step_time, loss))
+                  "%.4f" % (model.global_step, model.env_learning_rate, step_time, loss))
 
             step_time, loss = 0.0, 0.0
             sys.stdout.flush()
@@ -178,7 +177,6 @@ def train(exp_settings):
     checkpoint_path = os.path.join(args.model_dir, "%s.user_simulator.ckpt" % exp_settings['learning_algorithm'])
     print("Save model to %s" % checkpoint_path)
     torch.save(model.user_simulator.state_dict(), checkpoint_path)
-    """
 
     # 2. train ranking model
     # 2.1 load user simulator
@@ -186,6 +184,7 @@ def train(exp_settings):
     ckpt = torch.load(checkpoint_path)
     print("Reading user simulator parameters from %s" % checkpoint_path)
     model.user_simulator.load_state_dict(ckpt)
+
     model.user_simulator.eval()
 
     step_time, loss = 0.0, 0.0
@@ -195,7 +194,7 @@ def train(exp_settings):
     print("max_train_iter: ", args.max_train_iteration)
     while True:
         # Get a batch and make a step.
-        start_time = time.time()
+        start_time= time.time()
         input_feed, info_map = train_input_feed.get_batch(train_set, check_validation=True, data_format=args.data_format)
         step_loss, _, summary = model.train(input_feed)
         step_time += (time.time() - start_time) / args.steps_per_checkpoint
@@ -231,7 +230,7 @@ def train(exp_settings):
 
             valid_summary = validate_model(valid_set, valid_input_feed)
             # valid_writer.add_scalars('Validation Summary', valid_summary, model.global_step)
-            for key, value in valid_summary.items():
+            for key,value in valid_summary.items():
                 print(key, value)
 
             if args.test_while_train:
@@ -242,7 +241,7 @@ def train(exp_settings):
 
             # Save checkpoint if the objective metric on the validation set is better
             if "objective_metric" in exp_settings:
-                for key, value in valid_summary.items():
+                for key,value in valid_summary.items():
                     if key == exp_settings["objective_metric"]:
                         if current_step >= args.start_saving_iteration:
                             if best_perf == None or best_perf < value:
@@ -338,7 +337,6 @@ def test(exp_settings):
 
 
 def main(_):
-    init_seed(seed=2021, reproducibility=True)
     exp_settings = json.load(open(args.setting_file))
     if args.test_only:
         test(exp_settings)
