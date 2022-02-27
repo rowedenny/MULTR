@@ -10,7 +10,7 @@
     "ranking_model_hparams":"hidden_layer_sizes=[512, 256, 128]",
 
     "learning_algorithm": "ultra.learning_algorithm.MULTR",
-    "learning_algorithm_hparams":"sample_num=256, sample_cutoff=10",
+    "learning_algorithm_hparams":"",
 
     "metrics": [
         "ndcg", "err", "map"
