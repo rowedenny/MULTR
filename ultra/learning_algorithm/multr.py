@@ -14,6 +14,8 @@ from torch.utils.tensorboard import SummaryWriter
 
 from ultra.learning_algorithm.base_algorithm import BaseAlgorithm
 import ultra.utils
+import torchsnooper
+
 
 def sigmoid_prob(logits):
     return torch.sigmoid(logits - torch.mean(logits, -1, keepdim=True))
@@ -257,7 +259,7 @@ class MULTR(BaseAlgorithm):
         print('Build Model-based Unbiased Learning to Rank Model')
 
         self.hparams = ultra.utils.hparams.HParams(
-            learning_rate=0.5,                   # Learning rate
+            learning_rate=0.5,                    # Learning rate
             env_learning_rate=1e-3,
             max_gradient_norm=5.0,                # Clip gradients to this norm.
             ranker_loss_weight=1.0,               # Set the weight of unbiased ranking loss
@@ -270,7 +272,7 @@ class MULTR(BaseAlgorithm):
             propensity_learning_rate=-1.0,        # The learning rate for ranker (-1 means same with learning_rate).
             constant_propensity_initialization=False,                   # Set true to initialize propensity with constants.
             env_loss_func='softmax_cross_entropy_with_logit',           # Select Loss function
-            sample_num=16,                        #
+            sample_num=24,                        #
             hidden_size=64,
             teacher_forcing_ratio=0.5
         )
@@ -311,6 +313,7 @@ class MULTR(BaseAlgorithm):
         else:
             self.propensity_learning_rate = float(self.hparams.propensity_learning_rate)
         self.learning_rate = float(self.hparams.learning_rate)
+        self.env_learning_rate = float(self.hparams.env_learning_rate)
 
         self.global_step = 0
 
@@ -454,12 +457,12 @@ class MULTR(BaseAlgorithm):
         # Build model
         self.rank_list_size = self.exp_settings['selection_bias_cutoff']
         self.model.train()
-        # self.user_simulator.eval()
+        self.propensity_model.train()
+        self.user_simulator.eval()
 
         self.create_input_feed(input_feed, self.rank_list_size)
         train_output = self.ranking_model(self.model, self.rank_list_size)
 
-        self.propensity_model.train()
         propensity_labels = torch.transpose(self.labels, 0, 1)
         self.propensity = self.propensity_model(propensity_labels)
         with torch.no_grad():
@@ -471,8 +474,6 @@ class MULTR(BaseAlgorithm):
             self.relevance_weights = self.get_normalized_weights(self.logits_to_prob(train_output))
         self.exam_loss = self.loss_func(self.propensity, self.labels, self.relevance_weights)
 
-        """
-
         # IPS loss for observed ranking list with pseudo lists
         with torch.no_grad():
             observed_pseudo_labels = self.ranking_model(self.user_simulator, self.rank_list_size)
@@ -480,23 +481,21 @@ class MULTR(BaseAlgorithm):
         self.deivate_loss = self.rank_loss - self.observed_pseudo_loss
 
         # direct loss on unobserved ranking lists
-        pseudo_id_list = self.generate_pseudo_id_list(self.sample_num)
+        pseudo_id_list = self.generate_pseudo_id_list(self.hparams.sample_num)
         with torch.no_grad():
             unobserved_pseudo_labels = self.get_ranking_scores(model=self.user_simulator, input_id_list=pseudo_id_list)
         unobserved_pseudo_output = self.get_ranking_scores(model=self.model, input_id_list=pseudo_id_list)
         unobserved_pseudo_labels = torch.cat(unobserved_pseudo_labels, 1)
         unobserved_pseudo_output = torch.cat(unobserved_pseudo_output, 1)
         self.unobserved_pseudo_loss = self.loss_func(unobserved_pseudo_output, unobserved_pseudo_labels)
-        """
 
         # Gradients and SGD update operation for training the model.
-        # self.loss = self.exam_loss + self.hparams.ranker_loss_weight * (self.deivate_loss + self.unobserved_pseudo_loss)
-        self.loss = self.exam_loss + self.hparams.ranker_loss_weight * self.rank_loss
+        self.loss = self.exam_loss + self.hparams.ranker_loss_weight * (self.deivate_loss + self.unobserved_pseudo_loss)
         self.separate_gradient_update()
 
         self.clip_grad_value(self.labels, clip_value_min=0, clip_value_max=1)
-        # self.clip_grad_value(observed_pseudo_labels, clip_value_min=0, clip_value_max=1)
-        # self.clip_grad_value(unobserved_pseudo_labels, clip_value_min=0, clip_value_max=1)
+        self.clip_grad_value(observed_pseudo_labels, clip_value_min=0, clip_value_max=1)
+        self.clip_grad_value(unobserved_pseudo_labels, clip_value_min=0, clip_value_max=1)
         print(" [Ranking Model] Loss %f at Global Step %d: " % (self.loss.item(), self.global_step))
         self.global_step += 1
         return self.loss.item(), None, self.train_summary
@@ -507,6 +506,8 @@ class MULTR(BaseAlgorithm):
         with torch.no_grad():
             self.output = self.ranking_model(self.model,
                                              self.max_candidate_num)
+            self.output = self.output - torch.min(self.output)
+
         if not is_online_simulation:
             pad_removed_output = self.remove_padding_for_metric_eval(
                 self.docid_inputs, self.output)
@@ -533,7 +534,7 @@ class MULTR(BaseAlgorithm):
             propensity, dim=1)  # Compute propensity weights
         pw_list = []
         for i in range(len(propensity_list)):
-            pw_i = propensity_list[0] / propensity_list[i]
+            pw_i = propensity_list[0] / (propensity_list[i] + 1e-6)
             pw_list.append(pw_i)
         propensity_weights = torch.stack(pw_list, dim=1)
         if self.hparams.max_propensity_weight > 0:
