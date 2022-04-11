@@ -259,8 +259,8 @@ class MULTR(BaseAlgorithm):
         print('Build Model-based Unbiased Learning to Rank Model')
 
         self.hparams = ultra.utils.hparams.HParams(
-            learning_rate=0.5,                    # Learning rate
-            env_learning_rate=1e-3,
+            learning_rate=0.05,                   # Learning rate
+            env_learning_rate=1e-4,
             max_gradient_norm=5.0,                # Clip gradients to this norm.
             ranker_loss_weight=1.0,               # Set the weight of unbiased ranking loss
             l2_loss=0.0,                          # Set strength for L2 regularization.
@@ -272,7 +272,7 @@ class MULTR(BaseAlgorithm):
             propensity_learning_rate=-1.0,        # The learning rate for ranker (-1 means same with learning_rate).
             constant_propensity_initialization=False,                   # Set true to initialize propensity with constants.
             env_loss_func='softmax_cross_entropy_with_logit',           # Select Loss function
-            sample_num=24,                        #
+            sample_num=16,                        #
             hidden_size=64,
             teacher_forcing_ratio=0.5
         )
@@ -355,8 +355,9 @@ class MULTR(BaseAlgorithm):
             # for p in denoise_params:
             #    self.exam_loss += self.hparams.l2_loss * tf.nn.l2_loss(p)
             for p in ranking_model_params:
-                self.rank_loss += self.hparams.l2_loss * self.l2_loss(p)
-        self.loss = self.exam_loss + self.hparams.ranker_loss_weight * self.rank_loss
+                self.dr_loss += self.hparams.l2_loss * self.l2_loss(p)
+        # self.loss = self.exam_loss + self.hparams.ranker_loss_weight * self.rank_loss
+        self.loss = self.exam_loss + self.hparams.ranker_loss_weight * self.dr_loss
 
         opt_denoise = self.optimizer_func(self.propensity_model.parameters(), self.propensity_learning_rate)
         opt_ranker = self.optimizer_func(self.model.parameters(), self.learning_rate)
@@ -467,6 +468,7 @@ class MULTR(BaseAlgorithm):
         self.propensity = self.propensity_model(propensity_labels)
         with torch.no_grad():
             self.propensity_weights = self.get_normalized_weights(self.logits_to_prob(self.propensity))
+        # IPS loss for real clicks
         self.rank_loss = self.loss_func(train_output, self.labels, self.propensity_weights)
 
         # Compute examination loss
@@ -489,13 +491,17 @@ class MULTR(BaseAlgorithm):
         unobserved_pseudo_output = torch.cat(unobserved_pseudo_output, 1)
         self.unobserved_pseudo_loss = self.loss_func(unobserved_pseudo_output, unobserved_pseudo_labels)
 
+        self.dr_loss = self.deivate_loss * 1.0 + self.unobserved_pseudo_loss * self.hparams.sample_num
+        self.dr_loss = self.dr_loss / (1.0 + self.hparams.sample_num)
+
         # Gradients and SGD update operation for training the model.
-        self.loss = self.exam_loss + self.hparams.ranker_loss_weight * (self.deivate_loss + self.unobserved_pseudo_loss)
+        self.loss = self.exam_loss + self.hparams.ranker_loss_weight * self.dr_loss
         self.separate_gradient_update()
 
         self.clip_grad_value(self.labels, clip_value_min=0, clip_value_max=1)
         self.clip_grad_value(observed_pseudo_labels, clip_value_min=0, clip_value_max=1)
         self.clip_grad_value(unobserved_pseudo_labels, clip_value_min=0, clip_value_max=1)
+
         print(" [Ranking Model] Loss %f at Global Step %d: " % (self.loss.item(), self.global_step))
         self.global_step += 1
         return self.loss.item(), None, self.train_summary
