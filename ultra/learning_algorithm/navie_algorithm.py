@@ -75,31 +75,21 @@ class NavieAlgorithm(BaseAlgorithm):
 
     def train(self, input_feed):
         """Run a step of the model feeding the given inputs for training process.
-
         Args:
             input_feed: (dictionary) A dictionary containing all the input feed data.
-
         Returns:
             A triple consisting of the loss, outputs (None if we do backward),
             and a tf.summary containing related information about the step.
-
         """
         self.global_step += 1
         self.model.train()
-        """
-        self.create_input_feed(input_feed, self.rank_list_size)
-        train_output = self.ranking_model(self.model,
-                                          self.rank_list_size)
-        train_labels = self.labels
-        """
         self.create_input_feed(input_feed, self.rank_list_size)
 
         # Gradients and SGD update operation for training the model.
-        import numpy as np
-        random_indices = np.random.choice(self.rank_list_size, 5, replace=False)
-        train_output = self.ranking_model(self.model, 10)[:, random_indices]
-        train_labels = self.labels[:, random_indices]
 
+        train_output = self.ranking_model(self.model,
+                                          self.rank_list_size)
+        train_labels = self.labels
         self.loss = None
 
         if self.hparams.loss_func == 'sigmoid_loss':

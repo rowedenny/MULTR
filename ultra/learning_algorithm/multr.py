@@ -260,7 +260,7 @@ class MULTR(BaseAlgorithm):
 
         self.hparams = ultra.utils.hparams.HParams(
             learning_rate=0.05,                   # Learning rate
-            env_learning_rate=1e-4,
+            env_learning_rate=1e-3,
             max_gradient_norm=5.0,                # Clip gradients to this norm.
             ranker_loss_weight=1.0,               # Set the weight of unbiased ranking loss
             l2_loss=0.0,                          # Set strength for L2 regularization.
@@ -272,7 +272,7 @@ class MULTR(BaseAlgorithm):
             propensity_learning_rate=-1.0,        # The learning rate for ranker (-1 means same with learning_rate).
             constant_propensity_initialization=False,                   # Set true to initialize propensity with constants.
             env_loss_func='softmax_cross_entropy_with_logit',           # Select Loss function
-            sample_num=16,                        #
+            sample_num=32,                        #
             hidden_size=64,
             teacher_forcing_ratio=0.5
         )
@@ -466,33 +466,41 @@ class MULTR(BaseAlgorithm):
 
         propensity_labels = torch.transpose(self.labels, 0, 1)
         self.propensity = self.propensity_model(propensity_labels)
-        with torch.no_grad():
-            self.propensity_weights = self.get_normalized_weights(self.logits_to_prob(self.propensity))
-        # IPS loss for real clicks
-        self.rank_loss = self.loss_func(train_output, self.labels, self.propensity_weights)
 
-        # Compute examination loss
+        # COMPUTE examination loss
         with torch.no_grad():
             self.relevance_weights = self.get_normalized_weights(self.logits_to_prob(train_output))
         self.exam_loss = self.loss_func(self.propensity, self.labels, self.relevance_weights)
 
-        # IPS loss for observed ranking list with pseudo lists
+        with torch.no_grad():
+            self.propensity_weights = self.get_normalized_weights(self.logits_to_prob(self.propensity))
+
+        # ERROR deviation
+        # 1. IPS loss for real clicks
+        self.observed_real_ips_loss = self.loss_func(train_output, self.labels, self.propensity_weights)
+
+        # 2. IPS loss for observed ranking list with pseudo clicks
         with torch.no_grad():
             observed_pseudo_labels = self.ranking_model(self.user_simulator, self.rank_list_size)
-        self.observed_pseudo_loss = self.loss_func(train_output, observed_pseudo_labels, self.propensity_weights)
-        self.deivate_loss = self.rank_loss - self.observed_pseudo_loss
+        self.observed_pseudo_ips_loss = self.loss_func(train_output, observed_pseudo_labels, self.propensity_weights)
+        self.error_deviation = self.observed_real_ips_loss - self.observed_pseudo_ips_loss
 
-        # direct loss on unobserved ranking lists
+        # DIRECT LOSS on SAMPLED RANK LISTS
+        # 1. direct loss on unobserved ranking lists with pseudo clicks
         pseudo_id_list = self.generate_pseudo_id_list(self.hparams.sample_num)
         with torch.no_grad():
             unobserved_pseudo_labels = self.get_ranking_scores(model=self.user_simulator, input_id_list=pseudo_id_list)
         unobserved_pseudo_output = self.get_ranking_scores(model=self.model, input_id_list=pseudo_id_list)
         unobserved_pseudo_labels = torch.cat(unobserved_pseudo_labels, 1)
         unobserved_pseudo_output = torch.cat(unobserved_pseudo_output, 1)
-        self.unobserved_pseudo_loss = self.loss_func(unobserved_pseudo_output, unobserved_pseudo_labels)
+        self.unobserved_pseudo_naive_loss = self.loss_func(unobserved_pseudo_output, unobserved_pseudo_labels)
 
-        self.dr_loss = self.deivate_loss * 1.0 + self.unobserved_pseudo_loss * self.hparams.sample_num
-        self.dr_loss = self.dr_loss / (1.0 + self.hparams.sample_num)
+        # 2. direct loss on observed ranking lists with pseudo clicks
+        self.observed_pseudo_naive_loss = self.loss_func(train_output, observed_pseudo_labels)
+
+        self.dr_loss = self.error_deviation * 1.0 + self.observed_pseudo_naive_loss * 1.0 + \
+                       self.unobserved_pseudo_naive_loss * self.hparams.sample_num
+        self.dr_loss = self.dr_loss / (1.0 + 1.0 + self.hparams.sample_num)
 
         # Gradients and SGD update operation for training the model.
         self.loss = self.exam_loss + self.hparams.ranker_loss_weight * self.dr_loss
