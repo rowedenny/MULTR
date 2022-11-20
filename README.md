@@ -32,9 +32,14 @@ If you find MULTR useful in your research, please kindly use the following BibTe
 
 ```
 @article{luo2022model,
-  title={Model-based Unbiased Learning to Rank},
-  author={Luo, Dan and Zou, Lixin and Ai, Qingyao and Chen, Zhiyu and Yin, Dawei and Davison, Brian D},
-  journal={arXiv preprint arXiv:2207.11785},
-  year={2022}
+  author    = {Luo, Dan and 
+               Zou, Lixin and 
+               Ai, Qingyao and
+               Chen, Zhiyu and 
+               Yin, Dawei and 
+               Davison, Brian D.},
+  title     = {Model-based Unbiased Learning to Rank},
+  booktitle = {{WSDM} '23: Proceedings of the Sixteenth ACM International Conference on Web Search and Data Mining},
+  year      = {2023}
 }
 ```
