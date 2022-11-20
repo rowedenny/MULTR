@@ -21,6 +21,11 @@ You can find the corresponding configuration under the folder `offline_setting/m
 
 #### For more detailed implementation for MULTR, you can refer to `ultra/learning_algorithm/multr.py`
 
+## Hyper-parameters
+
+In the paper, we specifcially show the ranking performance w.r.t the number of sampled ranked lists, if you wanna tune 
+this hyperparamters, you can change the variable `sample_num` in `MULTR` class.
+
 ## Citation
 
 If you find MULTR useful in your research, please kindly use the following BibTex entry.
