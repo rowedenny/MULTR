@@ -1,5 +1,5 @@
 ## Model-based Unbiased Learning to Rank
-This is the repository corresponding to the WSDM2023 Paper "Model-based Unbiased Learning to Rank".
+This is the repository corresponding to the WSDM2023 Paper [Model-based Unbiased Learning to Rank](https://arxiv.org/pdf/2207.11785.pdf).
 
 Our implementation is based on [ULTRA](https://github.com/ULTR-Community/ULTRA_pytorch/).
 
