@@ -3,6 +3,10 @@ This is the repository corresponding to the WSDM2023 Paper [Model-based Unbiased
 
 Our implementation is based on [ULTRA](https://github.com/ULTR-Community/ULTRA_pytorch/).
 
+
+## Abstract
+Unbiased Learning to Rank (ULTR), i.e., learning to rank documents with biased user feedback data, is a well-known challenge in information retrieval. Existing methods in unbiased learning to rank typically rely on click modeling or inverse propensity weighting~ IPW). Unfortunately, search engines face the issue of a severe long-tail query distribution, which neither click modeling nor IPW handles well. Click modeling usually requires that the same query-document pair appears multiple times for reliable inference, which makes it fall short for tail queries; IPW suffers from high variance since it is highly sensitive to small propensity score values. Therefore, a general debiasing framework that works well under tail queries is sorely needed. To address this problem, we propose a model-based unbiased learning-to-rank framework. Specifically, we develop a general context-aware user simulator to generate pseudo clicks for unobserved ranked lists to train rankers, which addresses the data sparsity problem. In addition, considering the discrepancy between pseudo clicks and actual clicks, we take the observation of a ranked list as the treatment variable and further incorporate inverse propensity weighting with pseudo labels in a doubly robust way. The derived bias and variance indicate that the proposed model-based method is more robust than existing methods. Extensive experiments on benchmark datasets, including simulated datasets and real click logs, demonstrate that the proposed model-based method consistently outperforms state-of-the-art methods in various scenarios. 
+
 ## Data Preparation
 You need to first prepare the datasets [Yahoo! Learn to Rank Challenge](https://webscope.sandbox.yahoo.com/) and 
 [Istella-S](http://quickrank.isti.cnr.it/istella-dataset/). 
