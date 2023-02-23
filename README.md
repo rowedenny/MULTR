@@ -35,15 +35,20 @@ this hyperparamters, you can change the variable `sample_num` in `MULTR` class.
 If you find MULTR useful in your research, please kindly use the following BibTex entry.
 
 ```
-@article{luo2022model,
-  author    = {Luo, Dan and 
-               Zou, Lixin and 
-               Ai, Qingyao and
-               Chen, Zhiyu and 
-               Yin, Dawei and 
-               Davison, Brian D.},
-  title     = {Model-based Unbiased Learning to Rank},
-  booktitle = {{WSDM} '23: Proceedings of the Sixteenth ACM International Conference on Web Search and Data Mining},
-  year      = {2023}
+@inproceedings{10.1145/3539597.3570395,
+author = {Luo, Dan and Zou, Lixin and Ai, Qingyao and Chen, Zhiyu and Yin, Dawei and Davison, Brian D.},
+title = {Model-Based Unbiased Learning to Rank},
+year = {2023},
+isbn = {9781450394079},
+publisher = {Association for Computing Machinery},
+address = {New York, NY, USA},
+url = {https://doi.org/10.1145/3539597.3570395},
+doi = {10.1145/3539597.3570395},
+booktitle = {Proceedings of the Sixteenth ACM International Conference on Web Search and Data Mining},
+pages = {895–903},
+numpages = {9},
+keywords = {unbiased learning to rank, user simulator, doubly robust},
+location = {Singapore, Singapore},
+series = {WSDM '23}
 }
 ```
