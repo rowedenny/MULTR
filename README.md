@@ -35,20 +35,29 @@ this hyperparamters, you can change the variable `sample_num` in `MULTR` class.
 If you find MULTR useful in your research, please kindly use the following BibTex entry.
 
 ```
-@inproceedings{10.1145/3539597.3570395,
-author = {Luo, Dan and Zou, Lixin and Ai, Qingyao and Chen, Zhiyu and Yin, Dawei and Davison, Brian D.},
-title = {Model-Based Unbiased Learning to Rank},
-year = {2023},
-isbn = {9781450394079},
-publisher = {Association for Computing Machinery},
-address = {New York, NY, USA},
-url = {https://doi.org/10.1145/3539597.3570395},
-doi = {10.1145/3539597.3570395},
-booktitle = {Proceedings of the Sixteenth ACM International Conference on Web Search and Data Mining},
-pages = {895–903},
-numpages = {9},
-keywords = {unbiased learning to rank, user simulator, doubly robust},
-location = {Singapore, Singapore},
-series = {WSDM '23}
+@inproceedings{DBLP:conf/wsdm/LuoZACY023,
+  author    = {Dan Luo and
+               Lixin Zou and
+               Qingyao Ai and
+               Zhiyu Chen and
+               Dawei Yin and
+               Brian D. Davison},
+  editor    = {Tat{-}Seng Chua and
+               Hady W. Lauw and
+               Luo Si and
+               Evimaria Terzi and
+               Panayiotis Tsaparas},
+  title     = {Model-based Unbiased Learning to Rank},
+  booktitle = {Proceedings of the Sixteenth {ACM} International Conference on Web
+               Search and Data Mining, {WSDM} 2023, Singapore, 27 February 2023 -
+               3 March 2023},
+  pages     = {895--903},
+  publisher = {{ACM}},
+  year      = {2023},
+  url       = {https://doi.org/10.1145/3539597.3570395},
+  doi       = {10.1145/3539597.3570395},
+  timestamp = {Fri, 24 Feb 2023 13:56:00 +0100},
+  biburl    = {https://dblp.org/rec/conf/wsdm/LuoZACY023.bib},
+  bibsource = {dblp computer science bibliography, https://dblp.org}
 }
 ```
